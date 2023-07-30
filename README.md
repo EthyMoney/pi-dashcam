@@ -29,13 +29,13 @@ To get started with this project, clone this repository and then we'll take care
 First, install the required OS packages:
 
 ```bash
-sudo apt-get install python3 python3-pip ffmpeg
+sudo apt install python3 python3-pip ffmpeg -y
 ```
 
-Next, install the required Python packages:
+Next, install the required Python packages (run this from within the project folder):
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 You will need to modify the script with your specific network and WiFi details. In particular, you'll need to replace the placeholders in the script with your own values:
