@@ -4,6 +4,7 @@ from picamera2 import Picamera2
 import signal
 import time
 from wifi import Cell, Scheme
+from datetime import datetime
 
 # A flag to control whether recording should continue
 keep_recording = True
@@ -22,7 +23,10 @@ username = "yourusername"
 password = "yourpassword"
 
 # Video file details
-video_file = "test.mp4"
+# Get the start date and time
+start_time = datetime.now()
+# Format it as part of the filename
+video_file = start_time.strftime("%Y%m%d-%H%M%S") + ".mp4"
 
 # Define a function to run when SIGINT (Ctrl+C) is received
 def stop_recording(signal, frame):
@@ -73,6 +77,11 @@ while keep_recording:
 # Stop the recording when keep_recording is False
 print('Stopping video recording...')
 picam2.stop_recording()
+
+# Rename the video file with the end time appended
+end_time = datetime.now()
+new_file_name = start_time.strftime("%Y%m%d-%H%M%S") + "_TO_" + end_time.strftime("%Y%m%d-%H%M%S") + ".mp4"
+os.rename(video_file, new_file_name)
 
 # Wait until WiFi is connected to mount the network drive and copy the file
 while not connected_to_wifi():
