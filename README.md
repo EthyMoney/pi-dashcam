@@ -1,6 +1,6 @@
 # Raspberry Pi Dashcam
 
-This project transforms a Raspberry Pi into a functional dashcam. Leveraging the power of the PiCamera2 library and FFmpeg, it continuously records video while your vehicle is on the move, and automatically saves the recorded video to a network storage location when the vehicle returns home. The goal was to created an automated solution that automatically manages the video recording and storage process, storage, and files cleanup, minimizing the need for manual intervention. You will always have your most recent drive recorded and on your network storage, ready to be viewed or shared with ease.
+This project transforms a Raspberry Pi into a functional dashcam. Leveraging the power of the PiCamera2 library and FFmpeg, it continuously records video while your vehicle is on the move, and automatically saves the recorded video to a network storage location when the vehicle returns home. The goal was to create a solution that automatically manages the video recording start and stop and the storage and offloading of files, minimizing the need for any manual intervention while keeping the good parts of an off-the-shelf dashcam. You will always have your most recent trip recorded and on your network storage, ready to be viewed or shared with ease.
 
 ## Purpose
 
