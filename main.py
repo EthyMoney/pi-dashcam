@@ -15,6 +15,9 @@ wifi_lost = False
 # WiFi details
 ssid = "WiFi Name Here"
 
+# Flag to force kill program after 2 signal interrupts
+force_quit = False
+
 # Network storage details
 server_ip = "192.168.1.2"
 shared_folder = "mysharedfolder"
@@ -30,8 +33,14 @@ video_file = start_time.strftime("%Y%m%d-%H%M%S") + ".mp4"
 
 # Define a function to run when SIGINT (Ctrl+C) is received
 def stop_recording(signal, frame):
-    global keep_recording
+    global keep_recording, force_quit
     keep_recording = False
+    if force_quit:
+        print('Force quit signal received, bailing...')
+        # kill the script
+        exit(0)
+    else:
+        force_quit = True
 
 # Check if connected to the specified WiFi
 def connected_to_wifi():
@@ -85,7 +94,7 @@ os.rename(video_file, new_file_name)
 
 # Wait until WiFi is connected to mount the network drive and copy the file
 while not connected_to_wifi():
-    print('Waiting for WiFi connection...')
+    print('Waiting for WiFi connection to mount network drive...')
     time.sleep(1)
 
 # Mount the network drive
