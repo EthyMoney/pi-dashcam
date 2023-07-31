@@ -5,6 +5,41 @@ import signal
 import time
 from wifi import Cell, Scheme
 from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
+import Adafruit_SSD1306
+
+# ---OLED display imports and setup---
+# Raspberry Pi pin configuration:
+RST = None     # on the PiOLED this pin isnt used
+
+# 128x64 display with hardware I2C:
+disp = Adafruit_SSD1306.SSD1306_128_64(rst=RST)
+
+# Initialize library.
+disp.begin()
+
+# Clear display.
+disp.clear()
+disp.display()
+
+# Create blank image for drawing.
+width = disp.width
+height = disp.height
+image = Image.new('1', (width, height))
+draw = ImageDraw.Draw(image)
+
+# Load default font.
+font = ImageFont.load_default()
+
+# Function to display message on OLED display
+def display_message(message):
+    draw.rectangle((0, 0, width, height), outline=0, fill=0)  # clear the display
+    draw.text((0, 0), message, font=font, fill=255)  # draw the message
+    disp.image(image)
+    disp.display()
+
+display_message("We get worse ....")
+# ---End OLED display imports and setup---
 
 # A flag to control whether recording should continue
 keep_recording = True
@@ -102,16 +137,16 @@ mount_network_drive()
 
 # Copy the file to network storage
 print('Copying file to network storage...')
-shutil.copy2(video_file, mount_point)
+shutil.copy2(new_file_name, mount_point)
 print('File copied to network storage.')
 
 # Verify that the file was copied successfully to the network storage then make sure the size of the local file and network file are the same
 print('Verifying remote file...')
-if os.path.isfile(f"{mount_point}/{video_file}") and os.path.getsize(video_file) == os.path.getsize(f"{mount_point}/{video_file}"):
+if os.path.isfile(f"{mount_point}/{new_file_name}") and os.path.getsize(new_file_name) == os.path.getsize(f"{mount_point}/{new_file_name}"):
     print('Remote file verified.')
     # Delete the local file
     print('Deleting local file...')
-    os.remove(video_file)
+    os.remove(new_file_name)
     print('Local file deleted.')
 else:
     print('File not found in network storage, keeping local copy.')
