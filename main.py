@@ -86,10 +86,19 @@ def connected_to_wifi():
             return True
     return False
 
+# Check if the local mount point exists, if not create it
+def check_local_mount_point():
+    if not os.path.isdir(local_mount_point):
+        print('Creating local mount point...')
+        os.mkdir(local_mount_point)
+        print('Local mount point created.')
+        display_message("Local mount\npoint created.")
+
 # Mount the network drive, this will probably require sudo when running this program
 def mount_network_drive():
+    check_local_mount_point()
     print('Mounting network drive...')
-    os.system(f"sudo mount -t cifs //{server_ip}/{shared_folder} {mount_point} -o username={username},password={password},iocharset=utf8,file_mode=0777,dir_mode=0777")
+    os.system(f"sudo mount -t cifs //{server_ip}/{shared_folder} {local_mount_point} -o username={username},password={password},iocharset=utf8,file_mode=0777,dir_mode=0777")
     print('Network drive mounted.')
 
 picam2 = Picamera2()
@@ -110,7 +119,6 @@ while keep_recording:
     
     if connected_to_wifi():
         print('Connected to WiFi...')
-        display_message("Connected to WiFi...")
         # If connected to home WiFi and WiFi connection was previously lost, stop recording
         if wifi_lost:
             print('Reconnected to home WiF,. Signaling stop...')
@@ -148,14 +156,16 @@ mount_network_drive()
 # Copy the file to network storage
 print('Copying file to network storage...')
 display_message("Copying file\nto network storage...")
-shutil.copy2(new_file_name, mount_point)
+print(new_file_name)
+print(local_mount_point)
+shutil.copy2(new_file_name, local_mount_point)
 print('File copied to network storage.')
 display_message("File copied\nto network storage.")
 
 # Verify that the file was copied successfully to the network storage then make sure the size of the local file and network file are the same
 print('Verifying remote file...')
 display_message("Verifying remote file...")
-if os.path.isfile(f"{mount_point}/{new_file_name}") and os.path.getsize(new_file_name) == os.path.getsize(f"{mount_point}/{new_file_name}"):
+if os.path.isfile(f"{local_mount_point}/{new_file_name}") and os.path.getsize(new_file_name) == os.path.getsize(f"{local_mount_point}/{new_file_name}"):
     print('Remote file verified.')
     display_message("Remote file verified.")
     # Delete the local file
@@ -169,7 +179,7 @@ else:
     display_message("File not found in network storage,\nkeeping local copy.")
     print('Unmounting network drive...')
     display_message("Unmounting network drive...")
-    os.system(f"sudo umount {mount_point}")
+    os.system(f"sudo umount {local_mount_point}")
     print('Network drive unmounted.')
     display_message("Network drive unmounted.")
 
