@@ -139,7 +139,7 @@ os.rename(video_file, new_file_name)
 # Wait until WiFi is connected to mount the network drive and copy the file
 while not connected_to_wifi():
     print('Waiting for WiFi connection to mount network drive...')
-    display_message("Waiting for WiFi connection\nto mount network drive...")
+    display_message("Waiting for WiFi\nto mount\nnetwork drive...")
     time.sleep(1)
 
 # Mount the network drive
@@ -147,25 +147,35 @@ mount_network_drive()
 
 # Copy the file to network storage
 print('Copying file to network storage...')
+display_message("Copying file\nto network storage...")
 shutil.copy2(new_file_name, mount_point)
 print('File copied to network storage.')
+display_message("File copied\nto network storage.")
 
 # Verify that the file was copied successfully to the network storage then make sure the size of the local file and network file are the same
 print('Verifying remote file...')
+display_message("Verifying remote file...")
 if os.path.isfile(f"{mount_point}/{new_file_name}") and os.path.getsize(new_file_name) == os.path.getsize(f"{mount_point}/{new_file_name}"):
     print('Remote file verified.')
+    display_message("Remote file verified.")
     # Delete the local file
     print('Deleting local file...')
+    display_message("Deleting local file...")
     os.remove(new_file_name)
     print('Local file deleted.')
+    display_message("Local file deleted.")
 else:
     print('File not found in network storage, keeping local copy.')
+    display_message("File not found in network storage,\nkeeping local copy.")
     print('Unmounting network drive...')
+    display_message("Unmounting network drive...")
     os.system(f"sudo umount {mount_point}")
     print('Network drive unmounted.')
+    display_message("Network drive unmounted.")
 
 # Shutdown the Pi
 print('Shutting down...')
+display_message("Shutting down...")
 os.system("sudo shutdown now")
 
 # kill the script
