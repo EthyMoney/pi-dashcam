@@ -7,6 +7,7 @@ from wifi import Cell, Scheme
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import Adafruit_SSD1306
+from datetime import timedelta
 
 # ---OLED display imports and setup---
 # Raspberry Pi pin configuration:
@@ -102,6 +103,10 @@ signal.signal(signal.SIGINT, stop_recording)
 
 # Keep the script running while recording should continue
 while keep_recording:
+    # Calculate the video length and display it
+    video_length = datetime.now() - start_time
+    display_message("Recording...\nLength: " + str(timedelta(seconds=video_length.seconds)))
+    
     if connected_to_wifi():
         print('Connected to WiFi...')
         # If connected to home WiFi and WiFi connection was previously lost, stop recording
