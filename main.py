@@ -95,6 +95,7 @@ def mount_network_drive():
 picam2 = Picamera2()
 
 print('Starting video recording...')
+display_message("Starting video recording...")
 # Start the video recording
 picam2.start_and_record_video(video_file)
 
@@ -109,9 +110,11 @@ while keep_recording:
     
     if connected_to_wifi():
         print('Connected to WiFi...')
+        display_message("Connected to WiFi...")
         # If connected to home WiFi and WiFi connection was previously lost, stop recording
         if wifi_lost:
-            print('Previously lost WiFi connection. Stopping recording...')
+            print('Reconnected to home WiF,. Signaling stop...')
+            display_message("Reconnected to home WiFi, signaling stop...")
             keep_recording = False
             print('Waiting for FFmpeg to finish processing frames...')
             time.sleep(5)  # Wait before actually stopping the recording
@@ -125,6 +128,7 @@ while keep_recording:
 
 # Stop the recording when keep_recording is False
 print('Stopping video recording...')
+display_message("Stopping video recording...")
 picam2.stop_recording()
 
 # Rename the video file with the end time appended
@@ -135,6 +139,7 @@ os.rename(video_file, new_file_name)
 # Wait until WiFi is connected to mount the network drive and copy the file
 while not connected_to_wifi():
     print('Waiting for WiFi connection to mount network drive...')
+    display_message("Waiting for WiFi connection\nto mount network drive...")
     time.sleep(1)
 
 # Mount the network drive
