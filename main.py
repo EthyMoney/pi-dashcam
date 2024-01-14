@@ -8,6 +8,7 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import Adafruit_SSD1306
 from datetime import timedelta
+from webdav3.client import Client
 
 # ---OLED display imports and setup---
 # Raspberry Pi pin configuration:
@@ -48,18 +49,18 @@ keep_recording = True
 # A flag to check if WiFi connection was previously lost
 wifi_lost = False
 
-# WiFi details
-ssid = "WiFi Name Here"
-
 # Flag to force kill program after 2 signal interrupts
 force_quit = False
 
-# Network storage details
-server_ip = "192.168.1.2"
-shared_folder = "mysharedfolder"
-mount_point = "/mnt/myfolder"
-username = "yourusername"
-password = "yourpassword"
+# WiFi details
+ssid = ""
+
+# Configuration for the WebDAV client
+options = {
+    'webdav_hostname': "",
+    'webdav_login': "",
+    'webdav_password': ""
+}
 
 # Video file details
 # Get the start date and time
@@ -86,21 +87,6 @@ def connected_to_wifi():
             return True
     return False
 
-# Check if the local mount point exists, if not create it
-def check_local_mount_point():
-    if not os.path.isdir(local_mount_point):
-        print('Creating local mount point...')
-        os.mkdir(local_mount_point)
-        print('Local mount point created.')
-        display_message("Local mount\npoint created.")
-
-# Mount the network drive, this will probably require sudo when running this program
-def mount_network_drive():
-    check_local_mount_point()
-    print('Mounting network drive...')
-    os.system(f"sudo mount -t cifs //{server_ip}/{shared_folder} {local_mount_point} -o username={username},password={password},iocharset=utf8,file_mode=0777,dir_mode=0777")
-    print('Network drive mounted.')
-
 picam2 = Picamera2()
 
 print('Starting video recording...')
@@ -121,7 +107,7 @@ while keep_recording:
         print('Connected to WiFi...')
         # If connected to home WiFi and WiFi connection was previously lost, stop recording
         if wifi_lost:
-            print('Reconnected to home WiF,. Signaling stop...')
+            print('Reconnected to home WiFi,. Signaling stop...')
             display_message("Reconnected to home WiFi, signaling stop...")
             keep_recording = False
             print('Waiting for FFmpeg to finish processing frames...')
@@ -137,7 +123,18 @@ while keep_recording:
 # Stop the recording when keep_recording is False
 print('Stopping video recording...')
 display_message("Stopping video recording...")
-picam2.stop_recording()
+
+# if this fails, try it again
+try:
+  picam2.stop_recording()
+except:
+  # wait a bit and try again
+  time.sleep(5)
+  try:
+    picam2.stop_recording()
+  except:
+      # continue on
+      pass
 
 # Rename the video file with the end time appended
 end_time = datetime.now()
@@ -150,43 +147,32 @@ while not connected_to_wifi():
     display_message("Waiting for WiFi\nto mount\nnetwork drive...")
     time.sleep(1)
 
-# Mount the network drive
-mount_network_drive()
+# For all .mp4 files in the current directory, send their asses to the WebDAV server
+print('Opening webdav connection...')
+display_message("Opening webdav\nconnection...")
 
-# Copy the file to network storage
-print('Copying file to network storage...')
-display_message("Copying file\nto network storage...")
-print(new_file_name)
-print(local_mount_point)
-shutil.copy2(new_file_name, local_mount_point)
-print('File copied to network storage.')
-display_message("File copied\nto network storage.")
+# Create a WebDAV client
+client = Client(options)
 
-# Verify that the file was copied successfully to the network storage then make sure the size of the local file and network file are the same
-print('Verifying remote file...')
-display_message("Verifying remote file...")
-if os.path.isfile(f"{local_mount_point}/{new_file_name}") and os.path.getsize(new_file_name) == os.path.getsize(f"{local_mount_point}/{new_file_name}"):
-    print('Remote file verified.')
-    display_message("Remote file verified.")
-    # Delete the local file
-    print('Deleting local file...')
-    display_message("Deleting local file...")
-    os.remove(new_file_name)
-    print('Local file deleted.')
-    display_message("Local file deleted.")
-else:
-    print('File not found in network storage, keeping local copy.')
-    display_message("File not found in network storage,\nkeeping local copy.")
-    print('Unmounting network drive...')
-    display_message("Unmounting network drive...")
-    os.system(f"sudo umount {local_mount_point}")
-    print('Network drive unmounted.')
-    display_message("Network drive unmounted.")
+for file in os.listdir("."):
+    if file.endswith(".mp4"):
+        print('Uploading ' + file + '...')
+        display_message("Uploading\n" + file + "...")
+        # Upload the file to the WebDAV server
+        client.upload_sync(remote_path="/"+file, local_path=file)
+        print('Upload complete.')
+        display_message("Upload\ncomplete.")
+        # Delete the local file
+        print('Deleting local file...')
+        display_message("Deleting local file...")
+        os.remove(file)
+        print('Local file deleted.')
+        display_message("Local file deleted.")
 
 # Shutdown the Pi
 print('Shutting down...')
 display_message("Shutting down...")
-os.system("sudo shutdown now")
+#os.system("sudo shutdown now")
 
 # kill the script
 exit(0)
