@@ -1,7 +1,7 @@
 # Raspberry Pi Dashcam
 
 ## NOTE: This is an in-progress project!
-I'm still working through some of the finer details. The base code already here does work for the most part. Recording works, starting and stopping works, but the auto-uploading and shutdown is untested. It is also not decided yet on how I will trigger the stop recording.
+I'm still working through some of the finer details. The base code already here does work for the most part. Recording works, starting and stopping works, power input montoring works, auto-stopping and uploading works. The main pieces are all here, just need to do some field testing and polishing.
 #
 <br>
 
@@ -19,7 +19,7 @@ The purpose of this project is to provide an affordable, DIY alternative to comm
 
 3. **Monitoring WiFi Status:** While the program is running, it continuously checks the status of a specified WiFi connection (your home WiFi). Initially, the program recognizes that it's connected to the home WiFi, but it won't attempt to stop the recording until it has lost the connection first and then reconnected, indicating that the vehicle has left home and returned.
 
-4. **Stopping the Recording:** When the vehicle returns home, and the Pi reconnects to the home WiFi, the program stops the video recording.
+4. **Stopping the Recording:** When the vehicle returns home, and the Pi reconnects to the home WiFi, the program stops the video recording once it sees the PiSugar3 go to battery power (vehicle turned off).
 
 5. **Uploading the Video:** After stopping the recording, the program mounts the network storage drive and uploads the recorded video to this location.
 
