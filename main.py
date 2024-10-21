@@ -3,37 +3,51 @@ import shutil
 from picamera2 import Picamera2
 import signal
 import time
-from wifi import Cell, Scheme
+from wifi import Cell
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageFont
-import Adafruit_SSD1306
+import adafruit_ssd1306
+from board import SCL, SDA
+import busio
 from webdav3.client import Client
 import smbus  # For I2C communication with PiSugar3
+import urllib3
 
-# The To-Do list:
-# - Add PiSugar3 support
-#   - (test) Add battery % to OLED display
-#   - (test) Add shutdown when battery is low (stop recording, cancel in-progress uploads, and shutdown)
-#   - (test) Add i2c comms to detect if we are on battery power or plugged in
-#     - When WiFi is connected and we go to battery power, that means the car was shut off and we can stop recording and upload the video (and any previous video still pending upload), then shut down
-#     - If we go to battery power and don't have wifi, that means the car was shut off away from home, stop recording and shut down (keep video to upload later)
-#   - Integrate PiSugar3 RTC to get accurate time on pi for video timestamps
-# - Display number of videos pending upload on OLED display
-# - Maybe detect speed or at least overlay time on video feed
+###############################################
+#      General Setup and Helpers (Wi-Fi)               
+###############################################
+# region general
+
+# WiFi SSID
+ssid = "Steffen IoT"
+
+def connected_to_wifi():
+    cells = Cell.all("wlan0")
+    for cell in cells:
+        if cell.ssid == ssid:
+            return True
+    return False
+
+# For LAN WebDav, ignore self-signed SSL. Remove this if using public server!
+urllib3.disable_warnings()
+
+# endregion
+
+###############################################
+#       OLED Display Setup and Helpers               
+###############################################
+# region display
 
 # ---OLED display imports and setup---
-# Raspberry Pi pin configuration:
-RST = None  # on the PiOLED this pin isn't used
+# Create the I2C interface.
+i2c = busio.I2C(SCL, SDA)
 
-# 128x64 display with hardware I2C:
-disp = Adafruit_SSD1306.SSD1306_128_64(rst=RST)
-
-# Initialize library.
-disp.begin()
+# Create the SSD1306 OLED object for a 128x64 pixel display
+disp = adafruit_ssd1306.SSD1306_I2C(128, 64, i2c, addr=0x3C)
 
 # Clear display.
-disp.clear()
-disp.display()
+disp.fill(0)
+disp.show()
 
 # Create blank image for drawing.
 width = disp.width
@@ -43,36 +57,6 @@ draw = ImageDraw.Draw(image)
 
 # Load default font.
 font = ImageFont.load_default()
-
-# PiSugar3 I2C address and registers
-I2C_ADDR = 0x75
-CHARGE_PERCENTAGE_REG = 0x02
-CHARGING_STATUS_REG = 0x03
-
-# I2C bus initialization
-bus = smbus.SMBus(1)  # Using I2C bus 1
-
-
-# Function to get battery percentage from PiSugar3
-def get_battery_percentage():
-    try:
-        percentage = bus.read_byte_data(I2C_ADDR, CHARGE_PERCENTAGE_REG)
-        return percentage
-    except Exception as e:
-        print("Error reading battery percentage:", e)
-        return None
-
-
-# Function to check if the device is plugged in
-def is_plugged_in():
-    try:
-        status = bus.read_byte_data(I2C_ADDR, CHARGING_STATUS_REG)
-        # Charging status: 0x00 = not charging, 0x01 = charging
-        return status == 0x01
-    except Exception as e:
-        print("Error reading charging status:", e)
-        return None
-
 
 # Function to display message on OLED display with battery info
 def display_message(message):
@@ -90,154 +74,161 @@ def display_message(message):
         draw.text((0, height - 16), battery_status, font=font, fill=255)
 
     disp.image(image)
-    disp.display()
+    disp.show()
 
+# endregion
 
-# A flag to control whether recording should continue
-keep_recording = True
+###############################################
+#         PiSugar3 Setup and Helpers               
+###############################################
+# region pisugar3
 
-# A flag to check if WiFi connection was previously lost
-wifi_lost = False
+# PiSugar3 I2C addresses and registers
+I2C_BATTERY_ADDR = 0x57  # Address for PiSugar3
+BATTERY_PERCENTAGE_REG = 0x2A  # Register for battery percentage
+POWER_STATUS_REG = 0x02  # Register for power status (7th bit for external power)
 
-# Flag to force kill program after 2 signal interrupts
-force_quit = False
+# I2C bus initialization
+bus = smbus.SMBus(1)  # Using I2C bus 1
 
-# WiFi details
-ssid = ""
+# Function to get battery percentage from PiSugar3
+def get_battery_percentage():
+    try:
+        percentage = bus.read_byte_data(I2C_BATTERY_ADDR, BATTERY_PERCENTAGE_REG)
+        return percentage
+    except Exception as e:
+        print("Error reading battery percentage:", e)
+        return None
 
-# Configuration for the WebDAV client
-options = {"webdav_hostname": "", "webdav_login": "", "webdav_password": ""}
+# Function to check if the device is plugged in (external power detection)
+def is_plugged_in():
+    try:
+        power_status = bus.read_byte_data(I2C_BATTERY_ADDR, POWER_STATUS_REG)
+        # Check the 7th bit (0x80) for external power status: 1 = plugged in, 0 = not plugged in
+        return bool(power_status & 0x80)
+    except Exception as e:
+        print("Error reading charging status:", e)
+        return None
 
-# Video file details
-# Get the start date and time
-start_time = datetime.now()
-# Format it as part of the filename
-video_file = start_time.strftime("%Y%m%d-%H%M%S") + ".mp4"
+# endregion
 
+###############################################
+#          WebDav3 Setup and Helpers               
+###############################################
+# region webdav
 
-# Define a function to run when SIGINT (Ctrl+C) is received
-def stop_recording(signal, frame):
-    global keep_recording, force_quit
-    keep_recording = False
-    if force_quit:
-        print("Force quit signal received, bailing...")
-        exit(0)
-    else:
-        force_quit = True
+# WebDAV client options
+options = {
+    'webdav_hostname': "https://192.168.3.6/remote.php/dav/files/logan/dashcams/logan/",
+    'webdav_login': "logan",
+    'webdav_password': "8ZXXC-tiH52-AnDqR-bqmXY-s9gSx"  # App password
+}
 
+# Initialize WebDAV client
+client = Client(options)
+client.verify = False
 
-# Check if connected to the specified WiFi
-def connected_to_wifi():
-    cells = Cell.all("wlan0")
-    for cell in cells:
-        if cell.ssid == ssid:
-            return True
-    return False
+def upload_files():
+    print("Opening WebDAV connection...")
+    display_message("Opening WebDAV\nconnection...")
+    
+    for file in sorted(os.listdir(".")):
+        if file.endswith(".mp4"):
+            print("Uploading:", file)
+            display_message(f"Uploading\n{file}...")
+            retries = 3
+            while retries > 0:
+                try:
+                    client.upload_sync(remote_path="/" + file, local_path=file)
+                    print("Upload complete:", file)
+                    display_message("Upload complete.")
+                    os.remove(file)
+                    break  # Exit retry loop on success
+                except Exception as e:
+                    print(f"Failed to upload {file}. Error:", e)
+                    retries -= 1
+                    if retries == 0:
+                        print("Upload failed after 3 attempts. Keeping file for next time.")
+                        return False
+                    time.sleep(5)  # Delay before retrying
+    return True
 
+# endregion
 
+###############################################
+#          Camera Setup and Control               
+###############################################
+# region camera
+
+# Initialize Picamera2
 picam2 = Picamera2()
 
-print("Starting video recording...")
-display_message("Starting video recording...")
-# Start the video recording
-picam2.start_and_record_video(video_file)
+def start_recording():
+    start_time = datetime.now()
+    video_file = start_time.strftime("%Y%m%d-%H%M%S") + ".mp4"
+    print("Starting video recording:", video_file)
+    display_message("Starting video recording...")
+    picam2.start_and_record_video(video_file)
+    return video_file, start_time
 
-# Register the function to run on SIGINT
-signal.signal(signal.SIGINT, stop_recording)
-
-# Keep the script running while recording should continue
-while keep_recording:
-    # Calculate the video length and display it
-    video_length = datetime.now() - start_time
-    message = "Recording...\nLength: " + str(timedelta(seconds=video_length.seconds))
-    display_message(message)
-
-    # Check battery status
-    battery_percentage = get_battery_percentage()
-    plugged_in = is_plugged_in()
-
-    if battery_percentage is not None and plugged_in is not None:
-        if not plugged_in:
-            if battery_percentage < 20:
-                print("Battery low. Stopping recording and shutting down...")
-                display_message("Battery low.\nShutting down...")
-                keep_recording = False
-        else:
-            print("Device is plugged in.")
-    else:
-        print("Could not read battery status.")
-
-    if connected_to_wifi():
-        print("Connected to WiFi...")
-        # If connected to home WiFi and WiFi connection was previously lost, stop recording
-        if wifi_lost:
-            print("Reconnected to home WiFi. Signaling stop...")
-            display_message("Reconnected to WiFi.\nSignaling stop...")
-            keep_recording = False
-            print("Waiting for FFmpeg to finish processing frames...")
-            time.sleep(5)  # Wait before actually stopping the recording
-    else:
-        print("Not connected to WiFi...")
-        # If not connected to home WiFi, set wifi_lost flag to True
-        wifi_lost = True
-
-    # Wait a bit before checking the status again
-    time.sleep(1)
-
-# Stop the recording when keep_recording is False
-print("Stopping video recording...")
-display_message("Stopping video recording...")
-
-# Attempt to stop recording
-try:
-    picam2.stop_recording()
-except:
-    time.sleep(5)
+def stop_recording(video_file, start_time):
     try:
         picam2.stop_recording()
-    except:
-        pass
+    except Exception:
+        time.sleep(5)
+        try:
+            picam2.stop_recording()
+        except:
+            pass
 
-# Rename the video file with the end time appended
-end_time = datetime.now()
-new_file_name = (
-    start_time.strftime("%Y%m%d-%H%M%S")
-    + "_TO_"
-    + end_time.strftime("%Y%m%d-%H%M%S")
-    + ".mp4"
-)
-os.rename(video_file, new_file_name)
+    # Rename the video file with the end time appended
+    end_time = datetime.now()
+    new_file_name = (
+        start_time.strftime("%Y%m%d-%H%M%S")
+        + "_TO_"
+        + end_time.strftime("%Y%m%d-%H%M%S")
+        + ".mp4"
+    )
+    os.rename(video_file, new_file_name)
+    print("Recording stopped. File saved as:", new_file_name)
+    return new_file_name
 
-# Wait until WiFi is connected to upload the file
-while not connected_to_wifi():
-    print("Waiting for WiFi connection to upload files...")
-    display_message("Waiting for WiFi\nto upload files...")
-    time.sleep(1)
+# endregion
 
-print("Opening WebDAV connection...")
-display_message("Opening WebDAV\nconnection...")
 
-# Create a WebDAV client
-client = Client(options)
+###############################################
+#    --------------- MAIN ---------------              
+###############################################
 
-for file in os.listdir("."):
-    if file.endswith(".mp4"):
-        print("Uploading " + file + "...")
-        display_message("Uploading\n" + file + "...")
-        # Upload the file to the WebDAV server
-        client.upload_sync(remote_path="/" + file, local_path=file)
-        print("Upload complete.")
-        display_message("Upload\ncomplete.")
-        # Delete the local file
-        print("Deleting local file...")
-        display_message("Deleting local file...")
-        os.remove(file)
-        print("Local file deleted.")
-        display_message("Local file deleted.")
+# Main logic
+def main():
+    signal.signal(signal.SIGINT, lambda s, f: exit(0))
 
-# Shutdown the Pi
-print("Shutting down...")
-display_message("Shutting down...")
-# os.system("sudo shutdown now")
+    # Start recording immediately on startup
+    video_file, start_time = start_recording()
 
-exit(0)
+    # Continuously monitor power and WiFi status
+    while is_plugged_in():
+        display_message(f"Recording...\n{video_file}")
+        time.sleep(1)
+
+    # Power was lost; stop recording
+    new_file_name = stop_recording(video_file, start_time)
+
+    # Check WiFi connection and try to upload if connected
+    if connected_to_wifi():
+        success = upload_files()
+        if success:
+            print("All files uploaded. Shutting down.")
+        else:
+            print("Upload failed. Files will be kept for next time.")
+    else:
+        print("Not connected to WiFi. Saving files for later upload.")
+
+    # Shut down after completion
+    display_message("Shutting down...")
+    print("Shutting down...")
+    os.system("sudo shutdown now")
+
+if __name__ == "__main__":
+    main()

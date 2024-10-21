@@ -34,7 +34,7 @@ To get started with this project, clone this repository and then we'll take care
 First, install the required OS packages:
 
 ```bash
-sudo apt install python3 python3-pip ffmpeg python3-pil python3-rpi.gpio libcap-dev python3-libcamera -y
+sudo apt install python3 python3-pip ffmpeg python3-pil python3-rpi.gpio libcap-dev python3-libcamera python3-pyqt5 python3-opengl python3-picamera2 -y
 ```
 
 Next, install the required Python packages (run this from within the project folder):

@@ -1,3 +1,4 @@
-picamera2
 wifi
-Adafruit_SSD1306
+webdavclient3
+smbus
+adafruit-circuitpython-ssd1306
