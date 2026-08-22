@@ -1,4 +1,5 @@
-wifi
-webdavclient3
-smbus
+# Python packages (apt provides picamera2, libcamera, Pillow, numpy, opencv - see install.sh)
+requests>=2.25
+smbus2
 adafruit-circuitpython-ssd1306
+tomli; python_version < "3.11"

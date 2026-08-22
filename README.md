@@ -1,52 +1,175 @@
 # Raspberry Pi Dashcam
 
-## NOTE: This is an in-progress project!
-I'm still working through some of the finer details. The base code already here does work for the most part. Recording works, starting and stopping works, power input montoring works, auto-stopping and uploading works. The main pieces are all here, just need to do some field testing and polishing.
-#
-<br>
+A Raspberry Pi that behaves like a dashcam with no buttons and no SD-card shuffling: it
+powers on with the ignition, records the whole trip, and when you park at home it uploads
+the footage to your NAS over WebDAV and shuts itself off. Next trip, it does it again.
 
-This project transforms a Raspberry Pi into a functional dashcam. Leveraging the power of the PiCamera2 library and FFmpeg, it continuously records video while your vehicle is on the move, and automatically saves the recorded video to a network storage location when the vehicle returns home. The goal was to create a solution that automatically manages the video recording start and stop and the storage and offloading of files, minimizing the need for any manual intervention while keeping the good parts of an off-the-shelf dashcam. You will always have your most recent trip recorded and on your network storage, ready to be viewed or shared with ease.
+Hardware: a Raspberry Pi with a camera module, a [PiSugar3](https://www.pisugar.com/) UPS
+(keeps the Pi alive after ignition-off so it can finish the upload and shut down cleanly),
+and optionally a 128×64 SSD1306 OLED for status. Storage is a NAS that speaks WebDAV
+(Nextcloud in my case). Python dependencies are small: `requests`, `smbus2`, and the
+Adafruit SSD1306 library; the camera stack comes from apt.
 
-## Purpose
+## How it works
 
-The purpose of this project is to provide an affordable, DIY alternative to commercial dashcams while allowing for custom automatic behavior to make using it require no thought. This solution allows for continuous video recording that is automatically managed, so you never need to fiddle with an SD card or stupid cloud accounts and apps ever again!
+1. **Ignition on** → the PiSugar3 powers the Pi → the `dashcam` service starts recording
+   within seconds of boot. Every segment (2 min by default) is a standalone, crash-safe MP4
+   with the date/time burned in.
+2. **While driving** the OLED shows recording time, segment count, free space and battery.
+   If the NAS happens to be reachable (idling in the driveway), the backlog uploads in the
+   background on ignition power.
+3. **Ignition off** → the PiSugar3 reports "no external power". After 15 s of confirmed
+   loss the trip is considered over, but recording continues for a 60 s grace period in
+   case power comes back (fuel stop).
+4. **Trip end** → the last segment is finalized. If the NAS becomes reachable within 90 s
+   (home Wi-Fi), segments upload oldest-first on battery — each one verified by size on
+   the server before the local copy is deleted — bounded by a time budget and a battery
+   floor. Not home? Files wait for next time.
+5. **Shutdown** → `shutdown -h now`; pisugar-power-manager then cuts the PiSugar3 output so
+   the battery is not drained overnight, and *auto power on* wakes the Pi when ignition
+   returns.
 
-## How It Works
+Things that go wrong are designed to cost little: a bus glitch never ends a trip, a crash
+costs at most one segment (systemd restarts the service in 5 s), a dead OLED is ignored, a
+full card prunes the oldest footage, and one bad upload never blocks the rest.
 
-1. **Starting the Program:** The program is designed to launch automatically when the Raspberry Pi boots up. This can be triggered by starting the vehicle if the Pi is connected to the vehicle's power system.
+## Install
 
-2. **Video Recording:** As soon as the program starts, it begins recording video using the connected PiCamera. The video is saved to a local file on the Pi.
-
-3. **Monitoring WiFi Status:** While the program is running, it continuously checks the status of a specified WiFi connection (your home WiFi). Initially, the program recognizes that it's connected to the home WiFi, but it won't attempt to stop the recording until it has lost the connection first and then reconnected, indicating that the vehicle has left home and returned.
-
-4. **Stopping the Recording:** When the vehicle returns home, and the Pi reconnects to the home WiFi, the program stops the video recording once it sees the PiSugar3 go to battery power (vehicle turned off).
-
-5. **Uploading the Video:** After stopping the recording, the program mounts the network storage drive and uploads the recorded video to this location.
-
-6. **Verifying and Cleaning Up:** The program then verifies that the video was successfully uploaded by checking the file's existence and size on the network storage. If the upload was successful, it deletes the local copy of the video file. If the upload was not successful, it leaves the local copy intact for manual recovery.
-
-7. **Shutting Down:** Finally, the program cleanly shuts down the Raspberry Pi. Then the cycle repeats when the vehicle is started again.
-
-## Setup
-
-To get started with this project, clone this repository and then we'll take care of dependencies next:
-
-First, install the required OS packages:
-
-```bash
-sudo apt install python3 python3-pip ffmpeg python3-pil python3-rpi.gpio libcap-dev python3-libcamera python3-pyqt5 python3-opengl python3-picamera2 -y
-```
-
-Next, install the required Python packages (run this from within the project folder):
+On Raspberry Pi OS **Bookworm** (or newer), with the camera and PiSugar3 attached:
 
 ```bash
-pip3 install -r requirements.txt
+git clone https://github.com/EthyMoney/pi-dashcam.git
+cd pi-dashcam
+sudo bash install.sh
 ```
 
-You will need to modify the script with your specific network and WiFi details. In particular, you'll need to replace the placeholders in the script with your own values:
+The installer sets up apt/pip dependencies in a venv, creates `/etc/dashcam/config.toml`,
+enables I2C and the PiSugar3 RTC overlay, installs the `dashcam` systemd service, and — if
+pisugar-server is present — turns on *auto power on*. Then:
 
-- Replace `"WiFi Name Here"` with the SSID of your home WiFi.
-- Replace the server IP and shared folder name with your network storage details.
-- Replace the username and password with your network storage credentials.
+```bash
+sudo nano /etc/dashcam/config.toml      # NAS address, login, app password, resolution…
+sudo .venv/bin/dashcam --check          # self-test: camera, PiSugar3, OLED, RTC, NAS, login
+sudo systemctl start dashcam            # or just reboot
+journalctl -u dashcam -f                # watch it run; `-b -1` shows the previous trip
+```
 
-Finally, configure your Raspberry Pi to automatically run the script on boot. This can be done by adding a command to your Pi's `rc.local` file (or equivalent, depending on your operating system).
+(`sudo .venv/bin/python -m dashcam --check` does the same if the `dashcam` command is missing.)
+
+### PiSugar3 power manager (required for the full loop)
+
+Install PiSugar's own service — it is what makes the board cut power after `shutdown` and
+power the Pi on again when ignition returns:
+
+```bash
+wget https://cdn.pisugar.com/release/pisugar-power-manager.sh
+sudo bash pisugar-power-manager.sh -c release     # choose "PiSugar 3"
+sudo bash install.sh                                 # re-run: enables auto_power_on
+```
+
+You can also toggle *auto power on* in the PiSugar web UI (`http://<pi>:8421`). `dashcam
+--check` warns when it is off. Also worth setting there: a **safe shutdown level** (~10 %)
+so the board never runs the Pi completely flat.
+
+### RTC (correct timestamps without network)
+
+The PiSugar3 contains a DS3231-compatible clock. The installer adds
+`dtoverlay=i2c-rtc,ds3231` to `config.txt`; after a reboot the dashcam copies RTC → system
+clock at start and writes NTP-corrected time back to the RTC whenever it is home. Without
+this, every trip's filenames and the video overlay carry the time of the *previous*
+shutdown.
+
+On a Pi 5 the SoC has its own RTC at `/dev/rtc0`, so the PiSugar one becomes `/dev/rtc1`;
+the dashcam picks the DS3231 by driver name, so no configuration is needed either way.
+
+## Configuration
+
+Everything lives in `/etc/dashcam/config.toml` — see
+[`config.example.toml`](config.example.toml) for every key with comments. The ones you must
+set are in `[webdav]`:
+
+```toml
+[webdav]
+hostname = "https://nas.local/remote.php/dav/files/USERNAME/dashcam/"   # folder must exist
+login = "USERNAME"
+password = "APP-PASSWORD"      # Nextcloud: Settings → Security → Devices & sessions
+```
+
+**Use an upload-only credential.** The Pi lives in a parked car with this file on its SD
+card. A Nextcloud *File drop* share only lets the holder add files — a stolen SD card can
+then never read or delete your NAS:
+
+```toml
+hostname = "https://nas.local/public.php/webdav/"
+login = "SHARE-TOKEN"          # the token at the end of the share link
+password = ""                  # or the share password, if you set one
+```
+
+The dashcam detects this endpoint and adapts: File drop shares accept nothing but `PUT`, so
+segments are trusted once the server acknowledges the complete upload instead of being
+re-checked by size (that check needs `PROPFIND`, which such shares refuse).
+
+**TLS.** Self-signed NAS certificate? Copy it to the Pi and point `ca_cert` at it instead of
+turning verification off:
+
+```toml
+ca_cert = "/etc/dashcam/nas-cert.pem"   # the cert's SAN must include the NAS IP or name
+```
+
+Other knobs: resolution/framerate/bitrate and segment length in `[recording]`; debounce,
+grace period and battery floor in `[power]`; free-space floor in `[storage]`. Everything is
+optional and documented in the example file.
+
+### Tuning bitrate
+
+Work backwards from your Wi-Fi and battery: at the default 6 Mbit/s an hour of driving is
+~2.7 GB. Pi 3/4 hardware-encode tops out around 1080p30; a Pi 5 encodes in software (lower
+the resolution or framerate if it struggles).
+
+## Day-to-day
+
+```bash
+sudo .venv/bin/dashcam --check          # hardware / config / NAS self-test
+sudo .venv/bin/dashcam --upload-now     # drain the backlog without recording
+sudo .venv/bin/dashcam --no-shutdown    # run on the bench; never powers the Pi off
+journalctl -u dashcam -b -1             # log of the previous trip
+ls /var/lib/dashcam/videos/closed       # waiting for upload
+ls /var/lib/dashcam/videos/failed       # gave up after repeated upload failures
+```
+
+`systemctl stop dashcam` (SIGTERM) finalizes the current segment and exits without powering
+off. Only the ignition-off path shuts the Pi down.
+
+Segments are named `YYYYMMDD-HHMMSS_TO_YYYYMMDD-HHMMSS.mp4` (start and end). A segment
+recovered after a crash or power cut carries `_partial`; it is still playable up to the cut.
+
+## Layout
+
+```
+dashcam/
+  app.py        trip state machine: RECORDING → STOPPING → HOME_CHECK → UPLOADING → SHUTDOWN
+  recorder.py   picamera2, fragmented-MP4 segments, keyframe-aligned rotation, timestamp overlay
+  power.py      PiSugar3 over I2C (double-read, debounced loss detection)
+  uploader.py   upload queue: verify size then delete, background + on-battery modes
+  webdav.py     tiny WebDAV client (PUT + PROPFIND) that also works with Nextcloud File drop shares
+  storage.py    current/ closed/ failed/ layout, crash recovery, free-space pruning
+  network.py    "am I home" = TCP connect to the NAS; SSID only for logs
+  display.py    SSD1306 OLED (optional)
+  clock.py      RTC ↔ system clock
+  check.py      --check / --upload-now
+config.example.toml   documented config template
+dashcam.service       systemd unit (installed by install.sh)
+install.sh            installer
+tests/                hardware-free unit tests:  python -m unittest discover tests
+```
+
+## Ideas not done yet
+
+Cabin audio via a USB microphone (`FfmpegOutput(..., audio=True)`), an accelerometer
+to flag and protect incident segments, GPS sidecar logs, a second (rear/cabin) camera, a
+read-only root filesystem with a separate data partition. Watch the heat: a Pi plus LiPo in a
+windshield enclosure in summer sun is a bad combination — keep the battery low and shaded.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

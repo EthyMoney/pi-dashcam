@@ -1,0 +1,25 @@
+[Unit]
+Description=Pi Dashcam (record on ignition, upload when home, shut down)
+# Start as early as possible: every second before recording starts is footage lost.
+# Deliberately no network dependency - the uploader checks for the NAS itself.
+After=local-fs.target
+# Keep retrying forever: a crash loop while on battery must still reach the
+# power-loss -> shutdown path instead of draining the UPS flat.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=@APP_DIR@
+ExecStart=@PYTHON@ -m dashcam --config /etc/dashcam/config.toml
+Restart=always
+RestartSec=5
+# SIGTERM finalizes the current segment; give it time to flush.
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

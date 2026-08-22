@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-dashcam"
+version = "2.0.0"
+description = "Raspberry Pi dashcam: record on ignition, upload to a NAS when home, shut down"
+requires-python = ">=3.9"
+dependencies = [
+    "requests>=2.25",
+    "smbus2",
+    "adafruit-circuitpython-ssd1306",
+    "tomli; python_version < '3.11'",
+]
+
+[project.scripts]
+dashcam = "dashcam.app:main"
+
+[tool.setuptools]
+packages = ["dashcam"]

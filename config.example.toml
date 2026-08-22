@@ -1,0 +1,63 @@
+# pi-dashcam configuration
+#
+# Copy to /etc/dashcam/config.toml (install.sh does this) and edit.
+# This file holds your NAS credentials: keep it out of git and chmod 600.
+# Every key is optional; missing keys use the defaults shown here.
+
+[paths]
+data_dir = "/var/lib/dashcam"     # videos live in <data_dir>/videos/{current,closed,failed}
+
+[recording]
+width = 1920
+height = 1080
+framerate = 30
+bitrate = 6000000                 # bits per second. 6 Mbit/s ~= 2.7 GB per hour of driving.
+segment_seconds = 120             # each segment is a standalone, crash-safe MP4
+timestamp_overlay = true          # burn date/time into the frames (needs python3-opencv)
+hflip = false                     # flip if the camera is mounted upside down
+vflip = false
+
+[power]
+i2c_bus = 1
+pisugar_address = 0x57
+poll_seconds = 1.0
+loss_confirm_seconds = 15         # this many consecutive seconds without ignition power = trip is over
+return_grace_seconds = 60         # ...then keep recording this long in case power comes back (fuel stop)
+upload_battery_floor = 25         # while uploading on battery, stop and shut down below this %
+shutdown_command = "shutdown -h now"
+
+[network]
+home_ssid = ""                    # optional; only used in logs and on the display
+nas_check_timeout = 3             # seconds for the TCP "can I reach the NAS" probe
+home_check_seconds = 90           # after the trip, wait up to this long for home Wi-Fi
+upload_while_recording = true     # upload the backlog in the background whenever the NAS is reachable
+background_check_seconds = 30     # how often to look for the NAS while recording
+
+[webdav]
+# Nextcloud example. The folder must already exist on the server.
+hostname = "https://nas.local/remote.php/dav/files/USERNAME/dashcam/"
+login = "USERNAME"
+password = "APP-PASSWORD"         # make an app password: Settings -> Security -> Devices & sessions
+verify_tls = true                 # false skips certificate checks (not recommended)
+ca_cert = ""                      # path to the NAS's self-signed certificate (or your CA) to trust it properly
+timeout = 30                      # per-request timeout in seconds
+upload_time_budget_seconds = 900  # max time for the on-battery upload after a trip
+
+# Upload-only alternative (recommended): create a "File drop" public share on the dashcam
+# folder in Nextcloud and use the share token as the login:
+#   hostname = "https://nas.local/public.php/webdav/"
+#   login    = "SHARE-TOKEN"
+#   password = ""                 # or the share password if you set one
+# A stolen SD card can then only add files, never read or delete your NAS.
+# Such shares allow PUT only, so uploads are confirmed by the server accepting the
+# whole file rather than by a size check afterwards.
+
+[storage]
+min_free_gb = 4                   # delete the oldest local segments to keep at least this much free
+max_failed_uploads = 3            # after this many failed attempts a segment is parked in failed/
+
+[display]
+enabled = true                    # SSD1306 OLED; the dashcam works fine without one
+i2c_address = 0x3C
+width = 128
+height = 64
