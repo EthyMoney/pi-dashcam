@@ -172,15 +172,23 @@ class FakeDavClient:
         self.remote = {}          # name -> size
         self.fail_names = set()   # basenames that always fail to upload
         self.truncate_names = set()
+        self.abort_during = set()   # names for which upload() polls should_abort once mid-transfer
+        self.mid_transfer = None    # optional callable run at that point (e.g. to set a stop event)
         self.uploads = []
         FakeDavClient.instances.append(self)
 
     def check(self):
         return True
 
-    def upload(self, local_path, name):
+    def upload(self, local_path, name, should_abort=None):
         import os
         self.uploads.append(name)
+        if name in self.abort_during and should_abort is not None:
+            if self.mid_transfer is not None:
+                self.mid_transfer()
+            reason = should_abort()
+            if reason:
+                raise _webdav.UploadAborted(reason)
         if name in self.fail_names:
             raise ConnectionError("boom")
         size = os.path.getsize(local_path)

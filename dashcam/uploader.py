@@ -10,6 +10,12 @@ A file is only deleted locally after the server reports the same size (or,
 on an upload-only File drop share where that cannot be asked, after the server
 acknowledged the complete PUT). One bad file never blocks the others: it is
 retried up to max_failed times, then parked in failed/.
+
+Stop conditions (stop event, time budget, battery floor) are checked between
+files *and* about once a second inside a transfer, so a large segment on a
+slow link can neither outlive the budget nor keep the background thread busy
+once the trip has ended. A transfer cut short this way is not a failure: the
+server rejects the incomplete body and the file simply stays queued.
 """
 
 import logging
@@ -17,7 +23,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 from dashcam import clock, webdav
 from dashcam.config import WebdavConfig
@@ -26,6 +32,8 @@ from dashcam.network import HomeDetector
 from dashcam.storage import Storage
 
 log = logging.getLogger(__name__)
+
+AbortCheck = Callable[[], Optional[str]]
 
 
 @dataclass
@@ -58,6 +66,10 @@ class Uploader:
     # A just-closed segment may still be getting its last bytes from ffmpeg;
     # give it a moment before reading it.
     SETTLE_SECONDS = 3.0
+    # How long one cycle waits for another (normally the background thread) to
+    # let go of the queue. Transfers are interruptible, so this is only ever hit
+    # when something is badly stuck - and on battery we must not wait forever.
+    CYCLE_LOCK_TIMEOUT = 60.0
 
     def __init__(self, cfg: WebdavConfig, storage: Storage, home: HomeDetector,
                  display: Optional[Display] = None, max_failed: int = 3,
@@ -108,77 +120,102 @@ class Uploader:
     # ---- uploading --------------------------------------------------------
 
     def upload_pending(self, deadline: Optional[float] = None,
-                       should_abort: Optional[Callable[[], Optional[str]]] = None,
+                       should_abort: Optional[AbortCheck] = None,
                        stop_event: Optional[threading.Event] = None) -> UploadReport:
         """Upload every closed segment, oldest first. Thread-safe (one cycle at a time).
 
-        deadline      - time.monotonic() value after which no new file is started
+        deadline      - time.monotonic() value after which the cycle stops, even mid-file
         should_abort  - returns a reason string to stop (e.g. "battery 18% < 25%")
-        stop_event    - set to stop between files
+        stop_event    - set to stop, between files or mid-file
         """
-        with self._cycle_lock:
-            files = self.storage.closed_files()
-            report = UploadReport(total=len(files))
-            if not files:
-                return report
-            if not self.configured:
-                report.aborted = "webdav not configured"
-                report.remaining = len(files)
-                return report
-            if not self.home.nas_reachable():
-                report.nas_unreachable = True
-                report.remaining = len(files)
-                return report
-            try:
-                self.client()
-            except Exception as exc:
-                log.error("cannot create WebDAV client: %s", exc)
-                report.aborted = f"webdav client error: {exc}"
-                report.remaining = len(files)
-                return report
+        def abort_reason() -> Optional[str]:
+            if stop_event is not None and stop_event.is_set():
+                return "stop requested"
+            if deadline is not None and time.monotonic() >= deadline:
+                return "time budget used up"
+            if should_abort is not None:
+                return should_abort()
+            return None
 
-            for index, path in enumerate(files, start=1):
-                if stop_event is not None and stop_event.is_set():
-                    report.aborted = "stopped"
-                    break
-                if deadline is not None and time.monotonic() >= deadline:
-                    report.aborted = "time budget used up"
-                    break
-                if should_abort is not None:
-                    reason = should_abort()
-                    if reason:
-                        report.aborted = reason
-                        break
-                if not os.path.exists(path):
-                    continue  # pruned meanwhile
-                self.current_file = path
-                try:
-                    ok, nbytes = self._upload_one(path, index, len(files))
-                finally:
-                    self.current_file = None
-                if ok:
-                    report.uploaded += 1
-                    report.bytes_sent += nbytes
-                    self.attempts.pop(path, None)
-                else:
-                    report.failed += 1
-                    n = self.attempts.get(path, 0) + 1
-                    self.attempts[path] = n
-                    if n >= self.max_failed:
-                        self.storage.mark_failed(path)
-                        self.attempts.pop(path, None)
-                    if not self.home.nas_reachable():
-                        report.aborted = "NAS became unreachable"
-                        break
-            report.remaining = len(self.storage.closed_files())
-            if report.uploaded:
-                # We are evidently home: good moment to save NTP time into the RTC.
-                clock.write_rtc_if_synchronized()
-            self.last_report = report
-            log.info("upload cycle: %s", report.summary())
+        if not self._cycle_lock.acquire(timeout=self.CYCLE_LOCK_TIMEOUT):
+            pending = len(self.storage.closed_files())
+            log.warning("upload cycle skipped: another cycle is still running after %.0fs",
+                        self.CYCLE_LOCK_TIMEOUT)
+            return UploadReport(total=pending, remaining=pending, aborted="another upload cycle is still running")
+        try:
+            return self._run_cycle(abort_reason)
+        finally:
+            self._cycle_lock.release()
+
+    def _run_cycle(self, abort_reason: AbortCheck) -> UploadReport:
+        files = self.storage.closed_files()
+        report = UploadReport(total=len(files))
+        if not files:
+            return report
+        if not self.configured:
+            report.aborted = "webdav not configured"
+            report.remaining = len(files)
+            return report
+        if not self.home.nas_reachable():
+            report.nas_unreachable = True
+            report.remaining = len(files)
+            return report
+        try:
+            self.client()
+        except Exception as exc:
+            log.error("cannot create WebDAV client: %s", exc)
+            report.aborted = f"webdav client error: {exc}"
+            report.remaining = len(files)
             return report
 
-    def _upload_one(self, path: str, index: int, total: int):
+        for index, path in enumerate(files, start=1):
+            reason = abort_reason()
+            if reason:
+                report.aborted = reason
+                break
+            if not os.path.exists(path):
+                continue  # pruned meanwhile
+            name = os.path.basename(path)
+            self.current_file = path
+            try:
+                ok, nbytes = self._upload_one(path, index, len(files), abort_reason)
+            except FileNotFoundError:
+                log.info("%s vanished before it could be uploaded (pruned to free space)", name)
+                continue
+            except webdav.UploadAborted as exc:
+                report.aborted = str(exc)
+                log.info("upload of %s cut short (%s); it stays queued", name, exc)
+                break
+            finally:
+                self.current_file = None
+            if ok:
+                report.uploaded += 1
+                report.bytes_sent += nbytes
+                self.attempts.pop(path, None)
+            else:
+                report.failed += 1
+                n = self.attempts.get(path, 0) + 1
+                self.attempts[path] = n
+                if n >= self.max_failed:
+                    self.storage.mark_failed(path)
+                    self.attempts.pop(path, None)
+                if not self.home.nas_reachable():
+                    report.aborted = "NAS became unreachable"
+                    break
+        report.remaining = len(self.storage.closed_files())
+        if report.uploaded:
+            # We are evidently home: good moment to save NTP time into the RTC.
+            clock.write_rtc_if_synchronized()
+        self.last_report = report
+        log.info("upload cycle: %s", report.summary())
+        return report
+
+    def _upload_one(self, path: str, index: int, total: int,
+                    should_abort: Optional[AbortCheck] = None) -> Tuple[bool, int]:
+        """Upload and verify one file. Returns (ok, bytes_sent).
+
+        Raises FileNotFoundError if the file is gone and webdav.UploadAborted if
+        the abort check fired mid-transfer; neither counts as a failed attempt."""
         name = os.path.basename(path)
         try:
             age = time.time() - os.path.getmtime(path)
@@ -192,26 +229,47 @@ class Uploader:
                                 battery=self.battery_percent() if self.battery_percent else None)
         client = self.client()
         started = time.monotonic()
+        unverified = False
         try:
-            client.upload(path, name)
+            client.upload(path, name, should_abort=should_abort)
+        except (webdav.UploadAborted, FileNotFoundError):
+            raise
         except Exception as exc:
-            log.warning("upload failed for %s: %s", name, exc)
-            return False, 0
-        try:
-            remote_size = client.remote_size(name)
-        except Exception as exc:
-            log.warning("uploaded %s but could not verify it on the server: %s (keeping local copy)", name, exc)
-            return False, 0
-        if remote_size is not None and remote_size != size:
-            log.warning("size mismatch for %s: local %d, server %d - keeping local copy for retry",
-                        name, size, remote_size)
-            return False, 0
+            # A flaky link can lose the *response* after the last byte went out.
+            # If the server already holds the complete file, that is a success.
+            if not self._server_has_complete_file(client, name, size):
+                log.warning("upload failed for %s: %s", name, exc)
+                return False, 0
+            log.warning("PUT of %s reported an error (%s) but the server holds the complete file", name, exc)
+        else:
+            try:
+                remote_size = client.remote_size(name)
+            except Exception as exc:
+                log.warning("uploaded %s but could not verify it on the server: %s (keeping local copy)", name, exc)
+                return False, 0
+            if remote_size is None:
+                unverified = True
+            elif remote_size != size:
+                log.warning("size mismatch for %s: local %d, server %d - keeping local copy for retry",
+                            name, size, remote_size)
+                return False, 0
         self.storage.remove(path)
         elapsed = max(time.monotonic() - started, 0.001)
         log.info("uploaded %s (%.1f MB in %.0fs, %.1f Mbit/s)%s, local copy removed",
                  name, size / 1e6, elapsed, size * 8 / elapsed / 1e6,
-                 "" if remote_size is not None else " [size unverifiable on File drop share]")
+                 " [size unverifiable on File drop share]" if unverified else "")
         return True, size
+
+    def _server_has_complete_file(self, client: webdav.WebDavClient, name: str, size: int) -> bool:
+        """After a failed PUT: did the whole file arrive anyway? Only answerable on
+        a real folder (File drop shares refuse PROPFIND) and only worth asking
+        while the NAS is still reachable."""
+        if client.file_drop or not self.home.nas_reachable():
+            return False
+        try:
+            return client.remote_size(name) == size
+        except Exception:
+            return False
 
     # ---- background mode --------------------------------------------------
 
@@ -237,6 +295,8 @@ class Uploader:
         self._bg_thread.start()
 
     def stop_background(self, timeout: float = 120.0) -> None:
+        """Stop the background thread; a transfer in flight is cut short within
+        about a second (the file stays queued for the foreground upload)."""
         if self._bg_thread is None:
             return
         self._bg_stop.set()

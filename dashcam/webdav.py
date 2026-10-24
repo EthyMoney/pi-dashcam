@@ -8,8 +8,9 @@ flaky car-to-house Wi-Fi link.
 
 import logging
 import os
+import time
 import xml.etree.ElementTree as ET
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 from urllib.parse import quote
 
 log = logging.getLogger(__name__)
@@ -19,12 +20,56 @@ PROPFIND_SIZE = (
     '<d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/></d:prop></d:propfind>'
 )
 
+# Returns a reason string to stop, or None to carry on.
+AbortCheck = Callable[[], Optional[str]]
+
 
 class WebDavError(Exception):
     pass
 
 
+class UploadAborted(WebDavError):
+    """Raised from inside a PUT when the caller's abort check returned a reason.
+    The server never receives the complete body, so it stores nothing."""
+
+
+class _AbortableReader:
+    """File wrapper for a streamed PUT that can be cut short between chunks.
+
+    requests/urllib3 pull a file body in 8-16 KiB reads; about every
+    `check_interval` seconds the wrapper asks `should_abort()` and raises
+    UploadAborted if it answers with a reason. __len__ keeps Content-Length on
+    the request (no chunked encoding), so a cut-short body is rejected by the
+    server instead of being stored truncated.
+    """
+
+    def __init__(self, fh, size: int, should_abort: AbortCheck, check_interval: float):
+        self._fh = fh
+        self._size = size
+        self._should_abort = should_abort
+        self._interval = check_interval
+        self._next_check = 0.0
+
+    def __len__(self) -> int:
+        return self._size
+
+    def __iter__(self):
+        return iter(lambda: self.read(65536), b"")
+
+    def read(self, n: int = -1) -> bytes:
+        now = time.monotonic()
+        if now >= self._next_check:
+            self._next_check = now + self._interval
+            reason = self._should_abort()
+            if reason:
+                raise UploadAborted(reason)
+        return self._fh.read(n)
+
+
 class WebDavClient:
+    # How often a running PUT consults the caller's abort check.
+    ABORT_CHECK_INTERVAL = 1.0
+
     def __init__(self, base_url: str, login: str, password: str,
                  verify: Union[bool, str] = True, timeout: float = 30.0,
                  file_drop: Optional[bool] = None):
@@ -89,10 +134,17 @@ class WebDavClient:
         log.error("WebDAV check: HTTP %d %s for %s%s", r.status_code, r.reason, self.base, self._hint(r.status_code))
         return False
 
-    def upload(self, local_path: str, name: str) -> int:
-        """PUT the file. Returns the HTTP status (201 created / 204 overwritten)."""
+    def upload(self, local_path: str, name: str, should_abort: Optional[AbortCheck] = None) -> int:
+        """PUT the file. Returns the HTTP status (201 created / 204 overwritten).
+
+        `should_abort`, if given, is polled about once a second while the body
+        streams; a reason string cuts the transfer short with UploadAborted."""
         with open(local_path, "rb") as fh:   # requests streams it with Content-Length set
-            r = self.session.put(self.url_for(name), data=fh, timeout=self.timeout)
+            body = fh
+            if should_abort is not None:
+                size = os.fstat(fh.fileno()).st_size
+                body = _AbortableReader(fh, size, should_abort, self.ABORT_CHECK_INTERVAL)
+            r = self.session.put(self.url_for(name), data=body, timeout=self.timeout)
         if r.status_code not in (200, 201, 204):
             raise WebDavError(f"PUT {name}: HTTP {r.status_code} {r.reason}{self._hint(r.status_code)}")
         return r.status_code

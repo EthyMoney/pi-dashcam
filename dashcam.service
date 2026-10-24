@@ -13,9 +13,11 @@ WorkingDirectory=@APP_DIR@
 ExecStart=@PYTHON@ -m dashcam --config /etc/dashcam/config.toml
 Restart=always
 RestartSec=5
-# SIGTERM finalizes the current segment; give it time to flush.
+# SIGTERM finalizes the current segment and cuts short any upload in flight.
+# The recorder bounds its own teardown at 30 s (STOP_TIMEOUT + CLOSE_TIMEOUT);
+# leave headroom so a wedged encoder is abandoned by us, not SIGKILLed mid-flush.
 KillSignal=SIGTERM
-TimeoutStopSec=40
+TimeoutStopSec=60
 Environment=PYTHONUNBUFFERED=1
 StandardOutput=journal
 StandardError=journal

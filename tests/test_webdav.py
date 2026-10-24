@@ -20,7 +20,7 @@ except ImportError:  # pragma: no cover
 # which unittest loads first) replaces dashcam.webdav.WebDavClient with a fake
 # and stashes the original as RealWebDavClient.
 import dashcam.webdav as _wd  # noqa: E402
-from dashcam.webdav import WebDavError  # noqa: E402
+from dashcam.webdav import UploadAborted, WebDavError  # noqa: E402
 
 WebDavClient = getattr(_wd, "RealWebDavClient", _wd.WebDavClient)
 
@@ -68,7 +68,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_PUT(self):
+        expected = int(self.headers.get("Content-Length", "0") or 0)
         body = self._read_body()
+        if len(body) != expected:
+            # Client went away mid-body. Like Nextcloud: store nothing.
+            self.close_connection = True
+            return self._respond(400)
         if not self._authorized():
             return self._reject_unauthorized()
         if "/missing/" in self.path:
@@ -105,11 +110,16 @@ class Handler(BaseHTTPRequestHandler):
         self._respond(207, body)
 
 
+class QuietServer(ThreadingHTTPServer):
+    def handle_error(self, request, client_address):
+        pass   # a client that hangs up mid-upload is expected in these tests
+
+
 @unittest.skipUnless(HAVE_REQUESTS, "requests not installed")
 class WebDavClientTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.server = QuietServer(("127.0.0.1", 0), Handler)
         cls.port = cls.server.server_address[1]
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -167,6 +177,26 @@ class WebDavClientTests(unittest.TestCase):
         with self.assertRaises(WebDavError) as cm:
             c.remote_size("never-uploaded.mp4")
         self.assertIn("not on the server", str(cm.exception))
+
+    def test_upload_can_be_cut_short_mid_transfer(self):
+        big = os.path.join(self.tmp.name, "big.mp4")
+        with open(big, "wb") as fh:
+            fh.write(b"\x00" * (4 * 1024 * 1024))
+        c = WebDavClient(self.url("/dav/"), USER, PASS, timeout=5)
+        c.ABORT_CHECK_INTERVAL = 0.0                     # poll the check on every chunk
+        calls = {"n": 0}
+
+        def abort():
+            calls["n"] += 1
+            return "battery 18% below floor 25%" if calls["n"] >= 2 else None
+
+        with self.assertRaises(UploadAborted) as cm:
+            c.upload(big, "big.mp4", should_abort=abort)
+        self.assertIn("battery", str(cm.exception))
+        self.assertNotIn("/dav/big.mp4", Handler.store)   # nothing truncated left on the server
+        # The connection is torn down cleanly; the next upload just works.
+        self.assertEqual(c.upload(self.local, "seg.mp4", should_abort=lambda: None), 201)
+        self.assertEqual(c.remote_size("seg.mp4"), 5000)
 
     def test_file_drop_share(self):
         c = WebDavClient(self.url("/public.php/webdav/"), TOKEN, "", timeout=5)

@@ -297,9 +297,14 @@ class Dashcam:
         log.info("shutting down (%s): %s", why, cmd)
         sys.stdout.flush()
         try:
-            subprocess.run(shlex.split(cmd), check=False, timeout=60)
+            res = subprocess.run(shlex.split(cmd), check=False, timeout=60, capture_output=True, text=True)
         except Exception as exc:
-            print(f"shutdown command failed: {exc}", file=sys.stderr)
+            log.error("shutdown command failed: %s", exc)
+            return
+        if res.returncode != 0:
+            # Typically "not root". systemd restarts us and the next confirmed
+            # power loss tries again, but say so loudly rather than exiting quietly.
+            log.error("shutdown command exited %d: %s", res.returncode, (res.stderr or res.stdout).strip())
 
 
 # ---- CLI ------------------------------------------------------------------------

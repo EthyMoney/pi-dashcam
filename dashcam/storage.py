@@ -91,7 +91,12 @@ class Storage:
                 end = datetime.fromtimestamp(os.path.getmtime(path))
             except OSError:
                 end = None
-            target = self.close_segment(path, end=end, suffix="_partial")
+            try:
+                target = self.close_segment(path, end=end, suffix="_partial")
+            except OSError as exc:
+                # Read-only card, odd permissions... recording matters more than recovery.
+                log.error("could not recover %s: %s (leaving it in place)", name, exc)
+                continue
             if target:
                 log.warning("recovered partial segment from previous run: %s", os.path.basename(target))
                 recovered.append(target)

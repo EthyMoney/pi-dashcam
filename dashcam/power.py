@@ -9,6 +9,7 @@ unlock/lock dance on register 0x0B). Register map (official datasheet):
 """
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -39,26 +40,37 @@ class PowerSample:
 
 
 class PiSugar3:
+    """`available` means the board has answered at least once.
+
+    A board that does not answer at boot (the MCU NAKs the odd read, or is
+    still waking up) is polled again every cycle and becomes available the
+    moment it responds: one bad read at startup must not switch off
+    power-loss detection for the whole trip. Only a missing I2C bus
+    (/dev/i2c-N absent, I2C disabled) disables it for good.
+    """
+
     def __init__(self, bus: int = 1, address: int = 0x57):
         self.address = address
         self.bus = None
         self.available = False
         self._last_good_ctrl1: Optional[int] = None
+        # The main loop, the background uploader and the display path may all
+        # read the board; serialise so the double-read below stays meaningful.
+        self._lock = threading.Lock()
         try:
             try:
                 from smbus2 import SMBus  # pure python, maintained
             except ImportError:
                 from smbus import SMBus  # type: ignore
             self.bus = SMBus(bus)
-            # Probe once so a missing board is reported at startup, not mid-trip.
-            probe = self._read_raw(REG_CTRL1)
-            self.available = probe is not None
         except Exception as exc:
-            log.error("PiSugar3 not available (%s); power-loss detection disabled", exc)
+            log.error("I2C bus %d not usable (%s); power-loss detection disabled", bus, exc)
             self.bus = None
-            self.available = False
-        if self.available:
-            log.info("PiSugar3 found at 0x%02X", address)
+            return
+        # Probe once so a missing board is reported at startup, not mid-trip.
+        if self.read_reg(REG_CTRL1) is None:
+            log.warning("PiSugar3 did not answer at 0x%02X on I2C bus %d; will keep trying every poll",
+                        address, bus)
 
     # ---- low level -------------------------------------------------------
 
@@ -71,21 +83,32 @@ class PiSugar3:
             log.debug("i2c read 0x%02X failed: %s", reg, exc)
             return None
 
-    def read_reg(self, reg: int) -> Optional[int]:
-        """Double-read a register; the official driver does the same because the
-        MCU can change a byte between reads. A mismatch or error yields None."""
+    def _double_read(self, reg: int) -> Optional[int]:
+        """Two consecutive reads must agree; the official driver does the same
+        because the MCU can change a byte between reads."""
         a = self._read_raw(reg)
         if a is None:
             return None
         b = self._read_raw(reg)
-        if b is None or a != b:
-            # One more try before giving up on this poll.
-            time.sleep(0.02)
-            c = self._read_raw(reg)
-            if c is None or c != b:
-                return None
+        if b == a:
+            return a
+        # Mismatch or a failed second read: one more try before giving up on this poll.
+        time.sleep(0.02)
+        c = self._read_raw(reg)
+        if c is not None and c == (b if b is not None else a):
             return c
-        return a
+        return None
+
+    def read_reg(self, reg: int) -> Optional[int]:
+        """Read a register with the consistency check; None on error or mismatch."""
+        if self.bus is None:
+            return None
+        with self._lock:
+            value = self._double_read(reg)
+        if value is not None and not self.available:
+            self.available = True
+            log.info("PiSugar3 found at 0x%02X", self.address)
+        return value
 
     # ---- readings --------------------------------------------------------
 
@@ -116,14 +139,19 @@ class PiSugar3:
         return bool(val & BIT_AUTO_POWER_ON)
 
     def sample(self, with_battery: bool = True) -> PowerSample:
-        ext = self.external_power() if self.available else None
-        pct = self.battery_percent() if (with_battery and self.available) else None
+        ext = self.external_power()
+        # No point asking for the battery when the board just failed to answer.
+        pct = self.battery_percent() if (with_battery and ext is not None) else None
         return PowerSample(external=ext, percent=pct, millivolts=None)
 
     def startup_report(self) -> None:
         """Log the things that bite people in the field."""
+        if self.bus is None:
+            log.warning("no I2C bus: the dashcam will record until stopped or the power is cut")
+            return
         if not self.available:
-            log.warning("no PiSugar3: the dashcam will record until stopped or the power is cut")
+            log.warning("no PiSugar3 answer yet: until it responds the dashcam records until stopped or the "
+                        "power is cut (is the board seated? i2cdetect -y 1 should show 0x%02X)", self.address)
             return
         apo = self.auto_power_on_enabled()
         if apo is False:
@@ -143,8 +171,8 @@ class PowerMonitor:
     A single bad I2C read must never end a trip. Only consecutive seconds of
     *confirmed* "no external power" count towards a loss; unknown readings
     leave the streak untouched. A loss is reported only after
-    `loss_confirm_seconds`. `external_present()` then keeps returning False
-    until power is confirmed back, at which point the streak resets.
+    `loss_confirm_seconds`. `power_lost` then keeps returning True until power
+    is confirmed back, at which point the streak resets.
     """
 
     def __init__(self, pisugar: PiSugar3, loss_confirm_seconds: float):
@@ -185,6 +213,13 @@ class PowerMonitor:
         return self.confirmed_lost
 
     def battery_percent(self) -> Optional[int]:
-        if self.last_sample and self.last_sample.percent is not None:
-            return self.last_sample.percent
-        return self.pisugar.battery_percent() if self.pisugar.available else None
+        """Current charge, read fresh from the board.
+
+        The recording loop's last sample goes stale the moment we stop polling
+        to upload on battery, and the battery-floor check must see the battery
+        actually draining. A read that fails falls back to the last good sample.
+        """
+        pct = self.pisugar.battery_percent()
+        if pct is None and self.last_sample is not None:
+            pct = self.last_sample.percent
+        return pct

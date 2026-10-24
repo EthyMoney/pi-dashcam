@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from datetime import datetime
@@ -58,6 +59,10 @@ class ConfigTests(unittest.TestCase):
             load_config(self.write("[webdav]\nhostname = 'nas.local/dav'\n"))
         with self.assertRaises(ConfigError):
             load_config(self.write("[recording]\ntimestamp_overlay = 'yes'\n"))
+        with self.assertRaises(ConfigError):                       # bad port used to crash at startup
+            load_config(self.write("[webdav]\nhostname = 'https://nas.local:abc/dav/'\n"))
+        with self.assertRaises(ConfigError):                       # 0 would busy-loop the uploader
+            load_config(self.write("[network]\nbackground_check_seconds = 0\n"))
 
     def test_missing_explicit_file(self):
         with self.assertRaises(ConfigError):
@@ -113,16 +118,49 @@ class PowerTests(unittest.TestCase):
         mon.poll(1.0)
         self.assertTrue(mon.power_lost)           # second confirmed reading does
 
-    def test_missing_pisugar(self):
+    def test_silent_pisugar_at_boot_is_retried_every_poll(self):
         hwstubs.FakeSMBus.instances.clear()
         orig = hwstubs.FakeSMBus.read_byte_data
         hwstubs.FakeSMBus.read_byte_data = lambda self, a, r: (_ for _ in ()).throw(OSError("no device"))
         try:
             ps = PiSugar3(1, 0x57)
+            self.assertFalse(ps.available)
+            self.assertIsNone(ps.sample().external)
+            mon = PowerMonitor(ps, loss_confirm_seconds=2)
+            mon.poll(1.0)
+            self.assertFalse(mon.power_lost)
         finally:
             hwstubs.FakeSMBus.read_byte_data = orig
+        # The board starts answering: detection comes alive without a restart.
+        self.assertTrue(mon.poll(1.0).external)
+        self.assertTrue(ps.available)
+        hwstubs.FakeSMBus.instances[-1].regs[0x02] = 0x10
+        mon.poll(1.0); mon.poll(1.0)
+        self.assertTrue(mon.power_lost)
+
+    def test_missing_i2c_bus_disables_detection(self):
+        class NoBus:
+            def __init__(self, bus):
+                raise FileNotFoundError("/dev/i2c-1")
+        saved = hwstubs.smbus2.SMBus
+        hwstubs.smbus2.SMBus = NoBus
+        try:
+            ps = PiSugar3(1, 0x57)
+        finally:
+            hwstubs.smbus2.SMBus = saved
+        self.assertIsNone(ps.bus)
         self.assertFalse(ps.available)
         self.assertIsNone(ps.sample().external)
+        self.assertIsNone(PowerMonitor(ps, 2).battery_percent())
+
+    def test_battery_percent_is_read_fresh(self):
+        mon = PowerMonitor(self.ps, loss_confirm_seconds=3)
+        mon.poll(1.0)
+        self.assertEqual(mon.battery_percent(), 87)
+        self.bus.regs[0x2A] = 20            # drained while we were busy uploading, no poll since
+        self.assertEqual(mon.battery_percent(), 20)
+        self.bus.fail = True                # glitch: fall back to the last good sample
+        self.assertEqual(mon.battery_percent(), 87)
 
 
 class StorageTests(unittest.TestCase):
@@ -381,6 +419,53 @@ class UploaderTests(unittest.TestCase):
         self.assertTrue(up.client().file_drop)
         self.assertEqual(rep.uploaded, 1)                    # no PROPFIND possible -> PUT 201 is the proof
         self.assertEqual(self.st.closed_files(), [])
+
+    def test_abort_mid_transfer_keeps_file_and_is_not_a_failure(self):
+        a = self.seg("a.mp4")
+        self.seg("b.mp4")
+        up = Uploader(self.cfg, self.st, self.home, max_failed=1)
+        client = up.client()
+        client.abort_during.add("a.mp4")
+        calls = {"n": 0}
+
+        def abort():                        # fine between files, battery floor hit during the transfer
+            calls["n"] += 1
+            return None if calls["n"] < 2 else "battery 10% below floor 25%"
+
+        rep = up.upload_pending(should_abort=abort)
+        self.assertEqual((rep.uploaded, rep.failed), (0, 0))
+        self.assertIn("battery", rep.aborted)
+        self.assertEqual(rep.remaining, 2)
+        self.assertTrue(os.path.exists(a))
+        self.assertEqual(self.st.failed_files(), [])      # max_failed=1 would have parked it
+        self.assertEqual(up.attempts, {})
+
+    def test_stop_event_interrupts_a_transfer(self):
+        self.seg("a.mp4")
+        up = Uploader(self.cfg, self.st, self.home)
+        client = up.client()
+        ev = threading.Event()
+        client.abort_during.add("a.mp4")
+        client.mid_transfer = ev.set        # trip ends while the background upload is running
+        rep = up.upload_pending(stop_event=ev)
+        self.assertEqual(rep.uploaded, 0)
+        self.assertEqual(rep.aborted, "stop requested")
+        self.assertEqual(len(self.st.closed_files()), 1)
+
+    def test_lost_response_is_rescued_by_the_size_check(self):
+        a = self.seg("a.mp4", size=100)
+        up = Uploader(self.cfg, self.st, self.home, max_failed=1)
+        client = up.client()
+        client.fail_names.add("a.mp4")      # PUT raises...
+        client.remote["a.mp4"] = 100        # ...but the server has the complete file
+        rep = up.upload_pending()
+        self.assertEqual((rep.uploaded, rep.failed), (1, 0))
+        self.assertFalse(os.path.exists(a))
+        client.remote["a.mp4"] = 99         # short on the server: a real failure
+        b = self.seg("a.mp4", size=100)
+        rep = up.upload_pending()
+        self.assertEqual((rep.uploaded, rep.failed), (0, 1))
+        self.assertFalse(os.path.exists(b))               # parked in failed/ (max_failed=1)
 
     def test_background_thread_uploads(self):
         self.seg("a.mp4")

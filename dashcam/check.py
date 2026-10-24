@@ -68,7 +68,8 @@ def run_checks(cfg: Config) -> int:
     # Display
     disp = Display(cfg.display.enabled, cfg.display.i2c_address, cfg.display.width, cfg.display.height)
     if cfg.display.enabled:
-        _line(disp.ok, "oled display", "ready" if disp.ok else "not found (dashcam still works without it)")
+        _line(True if disp.ok else None, "oled display",
+              "ready" if disp.ok else "not found (dashcam still works without it)")
         if disp.ok:
             disp.show(["Dashcam check", time.strftime("%H:%M:%S"), "display OK"], force=True)
     else:

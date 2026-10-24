@@ -9,6 +9,7 @@ import logging
 import os
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, Optional
+from urllib.parse import urlparse
 
 try:  # Python 3.11+
     import tomllib
@@ -180,8 +181,24 @@ def validate(cfg: Config) -> None:
         raise ConfigError("[power] loss_confirm_seconds / return_grace_seconds cannot be negative")
     if not 0 <= cfg.power.upload_battery_floor <= 100:
         raise ConfigError("[power] upload_battery_floor must be 0-100")
-    if cfg.webdav.hostname and not cfg.webdav.hostname.lower().startswith(("http://", "https://")):
-        raise ConfigError("[webdav] hostname must start with http:// or https://")
+    net = cfg.network
+    if net.nas_check_timeout <= 0 or net.background_check_seconds <= 0:
+        raise ConfigError("[network] nas_check_timeout and background_check_seconds must be positive")
+    if net.home_check_seconds < 0:
+        raise ConfigError("[network] home_check_seconds cannot be negative")
+    if cfg.webdav.hostname:
+        parsed = urlparse(cfg.webdav.hostname)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ConfigError("[webdav] hostname must be a full URL such as "
+                              "https://nas.local/remote.php/dav/files/USERNAME/dashcam/")
+        try:
+            parsed.port   # raises for ":abc" or an out-of-range number
+        except ValueError:
+            raise ConfigError(f"[webdav] hostname has an invalid port: {cfg.webdav.hostname}")
+    if cfg.webdav.timeout <= 0:
+        raise ConfigError("[webdav] timeout must be positive")
+    if cfg.webdav.upload_time_budget_seconds < 0:
+        raise ConfigError("[webdav] upload_time_budget_seconds cannot be negative")
     if cfg.webdav.ca_cert and not os.path.isfile(cfg.webdav.ca_cert):
         raise ConfigError(f"[webdav] ca_cert file not found: {cfg.webdav.ca_cert}")
     if cfg.storage.min_free_gb < 0:
